@@ -1,4 +1,3 @@
-# something wrong with density or smoothing kernel
 
 import math
 import numpy as np
