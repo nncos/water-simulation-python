@@ -36,6 +36,7 @@ if preset == 1:
 boundary_min = particle_radius
 boundary_max = ti.Vector([gui_res[0] - epsilon, gui_res[1]]) - particle_radius
 
+
 # ti variables
 pixels = ti.Vector.field(3, dtype=ti.f32, shape=gui_res)
 positions = ti.Vector.field(dimensions, dtype=ti.f32, shape=number_of_particles)
@@ -46,7 +47,12 @@ densities = ti.field(dtype=ti.f32, shape=number_of_particles)
 mouse_position = ti.field(dtype=ti.f32, shape=2)
 particle_cell_keys =  ti.field(dtype=ti.i32, shape=number_of_particles)
 particle_index_sorted_by_cell =  ti.field(dtype=ti.i32, shape=number_of_particles)
-start_indices = ti.field(dtype=ti.i32, shape=number_of_particles)
+start_indices = ti.field(dtype=ti.i32, shape=10000)
+
+current_keys = ti.field(dtype=ti.i32, shape=9)
+count = ti.field(dtype=ti.i32, shape=())
+material = ti.field(dtype=ti.f32, shape=number_of_particles)
+
 
 # ti widgets
 gui = ti.GUI("PBF2D", gui_res)
@@ -130,8 +136,8 @@ def calculate_interaction_force(input_pos, radius, strength, particle_index):
 
 @ti.func
 def position_to_cell_coordinate(point, radius):
-    cell_x = int(point[0] / radius/2)
-    cell_y = int(point[1] / radius/2)
+    cell_x = int(point[0] / radius)
+    cell_y = int(point[1] / radius)
     return cell_x, cell_y
 
 @ti.func
@@ -148,37 +154,39 @@ def get_key_from_hash(hash):
 def for_each_point_within_radius(sample_index, smoothing_radius, target_density, pressure_multiplier):
     sample_point = positions[sample_index]
     centre_x, centre_y = position_to_cell_coordinate(sample_point, smoothing_radius)
-    smoothing_radius_squared = smoothing_radius * smoothing_radius
     pressure_force = ti.Vector([0.0, 0.0])
+    # if sample_index == 50:
+    #     count[None] = 0
     for offset in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2)))):
         key = hash_cell(centre_x + offset[0], centre_y + offset[1], smoothing_radius)
         cell_start_index = start_indices[key]
-
+        # if sample_index == 50:
+        #     current_keys[count[None]] = key
+        #     count[None] +=1
         for i in range(cell_start_index, number_of_particles):
-            if particle_cell_keys[i] != key:
+            if particle_cell_keys[i] != key or key < 0 or cell_start_index < 0 or key :
                 break
             particle_index = particle_index_sorted_by_cell[i]
             if sample_index == particle_index:
                 continue
+            if sample_index ==10:
+                material[particle_index] = 1.0
             vector_distance = sample_point - positions[particle_index]
-            vector_magnitude = vector_magnitude = vector_distance.norm()    # distance between particle and sample point
-            vector_magnitude_squared = vector_magnitude ** 2
-
-            if vector_magnitude_squared <= smoothing_radius_squared:
-                # if vector_magnitude > smoothing_radius:
-                #     continue
-                direction = vector_distance / vector_magnitude if vector_magnitude != 0 else (0, 1) # direction vector
-                slope = smoothing_kernel_derivative(vector_magnitude, smoothing_radius)
-                density = densities[particle_index]
-                shared_pressure = calculate_shared_pressure(density, densities[sample_index], target_density, pressure_multiplier)
-                pressure_force += shared_pressure * slope * direction / density
+            vector_magnitude = vector_distance.norm()    # distance between particle and sample point
+            if vector_magnitude > smoothing_radius:
+                continue
+            direction = vector_distance / vector_magnitude if vector_magnitude != 0 else (0, 1) # direction vector
+            slope = smoothing_kernel_derivative(vector_magnitude, smoothing_radius)
+            density = densities[particle_index]
+            shared_pressure = calculate_shared_pressure(density, densities[sample_index], target_density, pressure_multiplier)
+            pressure_force += shared_pressure * slope * direction / density
     return pressure_force
 
 
 @ti.kernel
-def update_particle_cell_keys(radius: ti.f32, smoothing_radius: ti.f32):
+def update_particle_cell_keys(smoothing_radius: ti.f32):
     for i in positions:
-        cell_x, cell_y = position_to_cell_coordinate(positions[i], radius)
+        cell_x, cell_y = position_to_cell_coordinate(positions[i], smoothing_radius)
         cell_key = hash_cell(cell_x, cell_y, smoothing_radius)
         particle_cell_keys[i] = cell_key
         start_indices[i] = -1  # reset start indices
@@ -202,8 +210,13 @@ def calculate_pressure_force(smoothing_radius: ti.f32, target_density: ti.f32, p
             calculate_interaction_force(ti.Vector([mouse_position[0], mouse_position[1]]), interaction_radius, interaction_strength, sample_index)
         elif mouse_input == 2:
             calculate_interaction_force(ti.Vector([mouse_position[0], mouse_position[1]]), interaction_radius, -interaction_strength, sample_index)
-            
         # update_position(sample_index)
+    count[None] = 0
+    x, y = position_to_cell_coordinate(mouse_position, smoothing_radius)
+    for offset in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2)))):
+        key = hash_cell(x + offset[0], y + offset[1], smoothing_radius)
+        current_keys[count[None]] = key
+        count[None] += 1
     
 @ti.kernel
 def gravity_and_density(smoothing_radius: ti.f32, gravity_value: ti.f32):
@@ -220,6 +233,10 @@ def initialize():
     cols = (gui_res[0] - 2 * a) // d  # Compute number of columns dynamically
     for n in positions:
         particle_index_sorted_by_cell[n] = n
+        if n == 50:
+            material[n] = 1.0
+        else:
+            material[n] = 0.0
         row = n // cols  # Compute row index
         col = n % cols    # Compute column index
         x = a + col * d + ti.random() * 2
@@ -234,21 +251,23 @@ def update_position(i: ti.i32):
 
 
 def simulation_step():
+    material.fill(0)
     gravity_and_density(smoothing_radius_slider.value, gravity_slider.value)
-    update_particle_cell_keys(smoothing_radius_slider.value, smoothing_radius_slider.value)
+    update_particle_cell_keys(smoothing_radius_slider.value)
     ti.algorithms.parallel_sort(particle_cell_keys, particle_index_sorted_by_cell)
     update_start_indices()
     calculate_pressure_force(smoothing_radius_slider.value, target_density_slider.value, pressure_multiplier_slider.value, mouse_input)
+    print(current_keys)
+
     # print(particle_cell_keys)
     # print(start_indices)
     # print(particle_index_sorted_by_cell)
 
 
-    
-
 def render(gui):
     gui.clear(bg_color)
-    gui.circles(positions.to_numpy()/gui_res, radius=particle_radius, color=0x000000)
+    # gui.circles(positions.to_numpy()/gui_res, radius=particle_radius, color=0x000000)
+    gui.circles(positions.to_numpy()/gui_res, radius=particle_radius, palette=[0xFF2D00,0x112F41], palette_indices=material)
     gui.show()
 
 initialize()
