@@ -164,7 +164,7 @@ def for_each_point_within_radius(sample_index, smoothing_radius, target_density,
         #     current_keys[count[None]] = key
         #     count[None] +=1
         for i in range(cell_start_index, number_of_particles):
-            if particle_cell_keys[i] != key or key < 0 or cell_start_index < 0 or key :
+            if particle_cell_keys[i] != key or key < 0 or cell_start_index < 0:
                 break
             particle_index = particle_index_sorted_by_cell[i]
             if sample_index == particle_index:
