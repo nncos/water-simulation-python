@@ -65,7 +65,7 @@ pressure_multiplier_slider.value = 1000
 gravity_slider = gui.slider('Gravity', 0, 1000, step=10)
 gravity_slider.value = 700
 
-
+# confines position of particles within gui and bounce
 @ti.func
 def confine_position_to_boundary(i):
     position = positions[i]
@@ -79,6 +79,7 @@ def confine_position_to_boundary(i):
             velocities[i][dimension] *= -0.9
     return position
 
+# calculate intensity of effect based on the distance between the particles
 @ti.func
 def smoothing_kernel(distance, smoothing_radius) -> ti.f32:
     influence = 0.0
@@ -89,6 +90,7 @@ def smoothing_kernel(distance, smoothing_radius) -> ti.f32:
         influence = (smoothing_radius - distance) * (smoothing_radius - distance) / volume
     return influence
 
+# derivative of smoothing kernel equation to calculate gradient
 @ti.func
 def smoothing_kernel_derivative(distance, smoothing_radius) -> ti.f32:
     slope = 0.0
@@ -99,6 +101,7 @@ def smoothing_kernel_derivative(distance, smoothing_radius) -> ti.f32:
         slope = (distance - smoothing_radius) * scale
     return slope
 
+# calculate density approximation by looping through every particle and summing the influence each particle has on the sample particle
 @ti.func
 def calculate_density(sample_point, smoothing_radius):
     density = 0.0
@@ -108,19 +111,21 @@ def calculate_density(sample_point, smoothing_radius):
         density += influence
     return density
 
-
+# some more math to make the particle move correctly
 @ti.func
 def convert_density_to_pressure(density, target_density, pressure_multiplier) -> ti.f32:
     density_error = density - target_density
     pressure = density_error * pressure_multiplier
     return pressure
 
+# simple solution to prevent total energy from increasing
 @ti.func
 def calculate_shared_pressure(density_A, density_B, target_density, pressure_multiplier):
     pressure_A = convert_density_to_pressure(density_A, target_density, pressure_multiplier)
     pressure_B = convert_density_to_pressure(density_B, target_density, pressure_multiplier)
     return (pressure_A + pressure_B) / 2
 
+# mouse input forces
 @ti.func
 def calculate_interaction_force(input_pos, radius, strength, particle_index):
     interaction_force = ti.Vector([0.0, 0.0])
@@ -134,22 +139,26 @@ def calculate_interaction_force(input_pos, radius, strength, particle_index):
         interaction_acceleration = interaction_force / densities[particle_index]
         velocities[particle_index] += interaction_acceleration * time_delta   
 
+# convert coordinate of particle to cell coordinates 
 @ti.func
 def position_to_cell_coordinate(point, radius):
     cell_x = int(point[0] / radius)
     cell_y = int(point[1] / radius)
     return cell_x, cell_y
 
+# convert cell coordinate to cell number (called "key")
 @ti.func
 def hash_cell(cell_x, cell_y, radius):
     a = cell_x
     b = cell_y * (gui_res[0]//radius)
     return int(a + b)
 
+# not used
 @ti.func
 def get_key_from_hash(hash):
     return hash % number_of_particles
 
+# pick a particle (sample index) -> calculate cell number of that particle -> loop through surrounding cells in a 3x3 area -> loop through all the particles in those cells, calculate the distances from the sample particle and the force effect they have on it
 @ti.func
 def for_each_point_within_radius(sample_index, smoothing_radius, target_density, pressure_multiplier):
     sample_point = positions[sample_index]
@@ -182,7 +191,7 @@ def for_each_point_within_radius(sample_index, smoothing_radius, target_density,
             pressure_force += shared_pressure * slope * direction / density
     return pressure_force
 
-
+# calculates the cell number that each particle is in
 @ti.kernel
 def update_particle_cell_keys(smoothing_radius: ti.f32):
     for i in positions:
@@ -191,6 +200,7 @@ def update_particle_cell_keys(smoothing_radius: ti.f32):
         particle_cell_keys[i] = cell_key
         start_indices[i] = -1  # reset start indices
 
+# part of the system used to get particles from cell number
 @ti.kernel
 def update_start_indices():
     for i in positions:
@@ -199,7 +209,7 @@ def update_start_indices():
         if key != key_prev:
             start_indices[key] = i
 
-
+# calculate the forces so that the particles move correctly
 @ti.kernel
 def calculate_pressure_force(smoothing_radius: ti.f32, target_density: ti.f32, pressure_multiplier: ti.f32, mouse_input: ti.i32):
     for sample_index in positions:
@@ -213,11 +223,14 @@ def calculate_pressure_force(smoothing_radius: ti.f32, target_density: ti.f32, p
         # update_position(sample_index)
     count[None] = 0
     x, y = position_to_cell_coordinate(mouse_position, smoothing_radius)
+    
+    # stores data to print later on as it cannot be printed from a kernel
     for offset in ti.static(ti.grouped(ti.ndrange((-1, 2), (-1, 2)))):
         key = hash_cell(x + offset[0], y + offset[1], smoothing_radius)
         current_keys[count[None]] = key
         count[None] += 1
     
+# add gravity and calculate density 
 @ti.kernel
 def gravity_and_density(smoothing_radius: ti.f32, gravity_value: ti.f32):
     gravity_vector = ti.Vector([0.0, -gravity_value])
@@ -226,6 +239,7 @@ def gravity_and_density(smoothing_radius: ti.f32, gravity_value: ti.f32):
         densities[i] = calculate_density(positions[i], smoothing_radius)
         update_position(i)
 
+# runs once only at the start
 @ti.kernel
 def initialize():
     a = 30  # Initial margin (padding)
@@ -244,12 +258,13 @@ def initialize():
         # Normalize to Taichi's 0-1 coordinate system
         positions[n] = ti.Vector([x, y])
 
+# adds velocity to position and keep within gui boundary
 @ti.func
 def update_position(i: ti.i32):
     positions[i] += velocities[i] * time_delta
     positions[i] = confine_position_to_boundary(i)
 
-
+# runs all the kernels every frame
 def simulation_step():
     material.fill(0)
     gravity_and_density(smoothing_radius_slider.value, gravity_slider.value)
@@ -263,13 +278,14 @@ def simulation_step():
     # print(start_indices)
     # print(particle_index_sorted_by_cell)
 
-
+# draw circles at all the positions of the particles
 def render(gui):
     gui.clear(bg_color)
     # gui.circles(positions.to_numpy()/gui_res, radius=particle_radius, color=0x000000)
     gui.circles(positions.to_numpy()/gui_res, radius=particle_radius, palette=[0xFF2D00,0x112F41], palette_indices=material)
     gui.show()
 
+# main loop
 initialize()
 while gui.running and not gui.get_event(gui.ESCAPE):
     gui.get_event()
